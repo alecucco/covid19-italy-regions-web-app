@@ -1,0 +1,22 @@
+# Segreti -- non devono MAI finire dentro un'immagine Docker
+.env
+
+# Ambiente virtuale locale (Windows/venv) -- inutile e dannoso dentro
+# un container Linux, verra' ricreato dal Dockerfile con pip install
+.venv/
+
+# Git
+.git/
+.gitignore
+
+# Python
+__pycache__/
+*.pyc
+
+# Documenti di lavoro, non parte dell'applicazione
+Documenti/
+
+# Editor / sistema
+.vscode/
+.idea/
+Thumbs.db

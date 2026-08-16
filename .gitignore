@@ -1,0 +1,21 @@
+# Secrets -- never commit real credentials
+.env
+
+# Python virtual environment
+.venv/
+
+# Python bytecode cache
+__pycache__/
+*.pyc
+
+# pytest cache
+.pytest_cache/
+
+# Personal working notes, not part of the application
+Documenti/
+
+# Editor / OS
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store

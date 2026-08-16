@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>COVID-19 — Total Cases by Italian Region</title>
+    <style>
+        body { font-family: sans-serif; max-width: 700px; margin: 2rem auto; padding: 0 1rem; color: #222; }
+        table { width: 100%; border-collapse: collapse; margin-top: 1.5rem; }
+        th, td { text-align: left; padding: 0.5rem; border-bottom: 1px solid #ddd; }
+        td:last-child, th:last-child { text-align: right; }
+        form { display: flex; gap: 1rem; align-items: end; flex-wrap: wrap; margin-top: 1.5rem; padding-bottom: 1rem; border-bottom: 1px solid #ddd; }
+        label { display: block; font-size: 0.85rem; color: #555; margin-bottom: 0.25rem; }
+        input, select, button { padding: 0.4rem; }
+    </style>
+</head>
+<body>
+    <h1>COVID-19 — Total Cases by Italian Region</h1>
+    {% if error %}
+    <p style="color:#b91c1c; background:#fee2e2; padding:0.5rem 0.75rem; border-radius:4px; font-size:0.9rem;">{{ error }}</p>
+    {% endif %}
+    {% if sort_error %}
+    <p style="color:#b91c1c; background:#fee2e2; padding:0.5rem 0.75rem; border-radius:4px; font-size:0.9rem;">{{ sort_error }}</p>
+    {% endif %}
+    {% if min_date and max_date %}
+    <p>Data available: <strong>{{ min_date }} – {{ max_date }}</strong></p>
+    {% endif %}
+    {% if fallback %}
+    <p style="color:#888; font-size:0.85rem; margin-top:-0.5rem;">No more recent data available from the source</p>
+    {% endif %}
+
+    <form method="get" action="/">
+        <div>
+            <!-- min/max/value are a convenience for the browser's date
+                 picker only -- the real validation happens server-side,
+                 in resolve_target_date, which can't be bypassed. -->
+            <label for="date">Search by date</label>
+            <input type="date" id="date" name="date" min="{{ min_date_iso }}" max="{{ max_date_iso }}" value="{{ shown_date_iso }}">
+        </div>
+        <div>
+            <label for="sort">Sort by</label>
+            <select id="sort" name="sort">
+                <option value="cases_desc" {{ "selected" if sort_order == "cases_desc" else "" }}>Total cases descending</option>
+                <option value="cases_asc" {{ "selected" if sort_order == "cases_asc" else "" }}>Total cases ascending</option>
+                <option value="name_asc" {{ "selected" if sort_order == "name_asc" else "" }}>Region name A-Z</option>
+                <option value="name_desc" {{ "selected" if sort_order == "name_desc" else "" }}>Region name Z-A</option>
+            </select>
+        </div>
+        <button type="submit">Search</button>
+        <!-- Carries the current date/sort along, so the export always
+             matches what's shown on the page, not a fixed default. -->
+        <a href="/export?date={{ shown_date_iso }}&sort={{ sort_order }}"><button type="button">Export .xls</button></a>
+    </form>
+
+    <table>
+        <thead>
+            <tr><th>Region</th><th>Total cases</th></tr>
+        </thead>
+        <tbody>
+            {% for region, cases in results %}
+            <tr>
+                <td>{{ region }}</td>
+                <td>{{ "{:,}".format(cases) }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</body>
+</html>
