@@ -3,6 +3,7 @@ GitHub repository, validate every record, and normalize it according
 to the rules defined during data analysis (see design notes)."""
 
 import datetime
+import time
 
 import httpx
 from rich.console import Console
@@ -37,18 +38,47 @@ GITHUB_LATEST_URL = (
 REGION_CODE_OVERRIDES = {"P.A. Bolzano": 21, "P.A. Trento": 22}
 
 
-def fetch_data() -> list[dict]:
-    """Download the raw JSON from GitHub.
+def fetch_data(max_attempts: int = 3, base_delay: float = 10.0) -> list[dict]:
+    """Download the raw JSON from GitHub, retrying with a growing delay
+    on transient failures (rate limiting, timeouts, brief outages)
+    instead of giving up on the very first hiccup.
+
+    This is the download used for the initial 109 MB population, so a
+    failure here is genuinely critical (there's no data to serve
+    otherwise) -- but a single failed attempt is not: GitHub's raw
+    content CDN occasionally returns 429/503 for reasons that resolve
+    within seconds, and immediately crashing (combined with Docker's
+    restart policy) turns one transient hiccup into a tight restart
+    loop that hits the same rate limit even harder.
+
+    Args:
+        max_attempts (int): Maximum number of attempts before giving up.
+        base_delay (float): Base delay in seconds between attempts;
+            grows with each retry (5s, 10s, 15s, ...).
 
     Returns:
         list[dict]: The raw list of per-province, per-day records.
 
     Raises:
-        httpx.HTTPStatusError: If the request fails.
+        httpx.HTTPError: If every attempt fails.
     """
-    response = httpx.get(GITHUB_URL, timeout=30.0)
-    response.raise_for_status()
-    return response.json()
+    last_error: httpx.HTTPError | None = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            response = httpx.get(GITHUB_URL, timeout=30.0)
+            response.raise_for_status()
+            return response.json()
+        except httpx.HTTPError as exc:
+            last_error = exc
+            if attempt == max_attempts:
+                break
+            delay = base_delay * attempt
+            console.print(
+                f"[yellow]⚠ Download failed ({exc}); "
+                f"retrying in {delay:.0f}s (attempt {attempt}/{max_attempts})...[/yellow]"
+            )
+            time.sleep(delay)
+    raise last_error
 
 
 def _normalize_region_code(region_code: int, region_name: str) -> int:
