@@ -59,13 +59,6 @@ pytest tests/ -v
 
 25 tests cover aggregation and sorting logic, date/sort parameter validation, the `.xls` export, full HTTP routes, and security checks (SQL injection attempts, XSS payloads, and consistency between the page and the export for identical parameters).
 
-## Notable technical decisions
-
-- **Region codes for the two autonomous provinces (Bolzano/Trento)** are normalized to the codes used in the official regional dataset (`21`/`22`), because the per-province file switches to a single ambiguous code (`4`) for both after 25/06/2020.
-- **Sort order is a closed whitelist** (a Python `Enum`), never a raw string interpolated into SQL — the primary defense against injection on that parameter.
-- **Database connection retries with a bounded timeout** at startup: without an explicit timeout, an unreachable database can hang for a duration that depends on the operating system's own defaults, which vary widely between Linux and Windows.
-- **The `/export` route reuses the exact same date/sort resolution logic as the main page**, so the downloaded file always matches what's currently shown — never a fixed default regardless of the current search.
-- **Unhandled errors** are logged in full server-side but shown to the client only as a generic page, to avoid leaking internal details (verified explicitly with a forced error containing a database credential, confirming it never reaches the client).
 
 ## Project structure
 
@@ -82,7 +75,8 @@ app/
 └── templates/
     ├── index.html                # Main page
     ├── error_404.html             # Custom 404 page
-    └── error_500.html              # Custom 500 page
+    ├── error_500.html              # Custom 500 page
+    └── error_503.html               # Custom 503 page (database unreachable)
 
 tests/                    # Automated test suite (pytest)
 docker-compose.yml         # Postgres + application services
