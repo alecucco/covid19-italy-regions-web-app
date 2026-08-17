@@ -6,7 +6,10 @@ Built as a technical hiring assessment.
 
 📄 For a more detailed discussion of the data analysis and database design process — including the full schema rationale and data validation rules — see [`technical-decisions.pdf`](technical-decisions.pdf).
 
-![Main page screenshot](images/homepage.png)
+<p align="center">
+  <img src="images/homepage.png" alt="Main page screenshot" width="80%">
+</p>
+
 
 ## Features
 
