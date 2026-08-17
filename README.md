@@ -4,7 +4,7 @@ A web application that reads the per-province COVID-19 dataset published by the 
 
 Built as a technical hiring assessment.
 
-📄 For a more detailed discussion of the data analysis and database design process — including the full schema rationale and data validation rules — see [`technical-decisions.pdf`](technical-decisions.pdf).
+📄 For a more detailed discussion of the data analysis and database design process — including the full schema rationale and data validation rules — see [`technical-notes.md`](technical-notes.md).
 
 <p align="center">
   <img src="images/homepage.png" alt="Main page screenshot" width="80%">
