@@ -46,6 +46,8 @@ docker compose up --build
 
 Open [http://localhost:8000](http://localhost:8000). On first run, the application creates the database schema and downloads the full historical dataset (~110 MB) automatically — this takes a few seconds. Subsequent runs skip this step, checking for new data with a much smaller request instead.
 
+<p align="center"> <img src="images/startup-log.png" alt="Startup and data loading log" width="90%"> </p>
+
 ## Running the tests
 
 Tests run against a temporary, in-memory-backed SQLite database with fixed sample data — no network access or running Postgres instance required.
