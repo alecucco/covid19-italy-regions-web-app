@@ -145,6 +145,29 @@ async def http_exception_handler(
     return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
 
 
+@app.exception_handler(OperationalError)
+async def database_error_handler(request: Request, exc: OperationalError) -> Response:
+    """Handle a database that becomes unreachable while the app is
+    already running (e.g. the 'db' container is stopped mid-session) --
+    distinct from wait_for_database, which only covers startup.
+
+    More specific than the generic Exception handler below, so it takes
+    precedence for this particular failure: a 503 with a clear message,
+    not a generic 500 that implies a bug in the application itself.
+
+    Args:
+        request (Request): The incoming request (needed by Jinja2Templates).
+        exc (OperationalError): The database connection failure.
+
+    Returns:
+        Response: The error_503.html page, with status 503.
+    """
+    console.print(f"[bold red]✗ Database error while handling a request:[/bold red] {exc}")
+    return templates.TemplateResponse(
+        request=request, name="error_503.html", status_code=503
+    )
+
+
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(request: Request, exc: Exception) -> Response:
     """Catch-all for unexpected errors.

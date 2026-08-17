@@ -209,15 +209,28 @@ def check_for_updates(session: Session) -> bool:
     """Cheap check: download only the 'latest' file (~60 KB) and compare
     it against the most recent date already in the database.
 
+    This is a best-effort, non-critical check: any network failure
+    (rate limiting, timeout, GitHub being unreachable) is caught and
+    logged, never allowed to crash the app -- the app already has
+    valid data, so it should keep serving it rather than fail to start.
+
     Args:
         session (Session): Active database session.
 
     Returns:
         bool: True if GitHub has published days we don't have yet.
+            False if already up to date, or if the check itself failed.
     """
-    response = httpx.get(GITHUB_LATEST_URL, timeout=15.0)
-    response.raise_for_status()
-    latest_records = response.json()
+    try:
+        response = httpx.get(GITHUB_LATEST_URL, timeout=15.0)
+        response.raise_for_status()
+        latest_records = response.json()
+    except httpx.HTTPError as exc:
+        console.print(
+            f"[yellow]⚠ Could not check for updates ({exc}); "
+            f"skipping and using existing data.[/yellow]"
+        )
+        return False
 
     if not latest_records:
         return False
