@@ -1,8 +1,7 @@
-# Segreti -- non devono MAI finire dentro un'immagine Docker
+# Secrets -- never commit real credentials
 .env
 
-# Ambiente virtuale locale (Windows/venv) -- inutile e dannoso dentro
-# un container Linux, verra' ricreato dal Dockerfile con pip install
+# Python virtual environment
 .venv/
 
 # Git
@@ -13,10 +12,10 @@
 __pycache__/
 *.pyc
 
-# Documenti di lavoro, non parte dell'applicazione
-Documenti/
+# Personal working notes, not part of the application
+documents/
 
-# Editor / sistema
+# Editor / OS
 .vscode/
 .idea/
 Thumbs.db
