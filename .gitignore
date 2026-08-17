@@ -12,7 +12,7 @@ __pycache__/
 .pytest_cache/
 
 # Personal working notes, not part of the application
-Documenti/
+documents/
 
 # Editor / OS
 .vscode/
