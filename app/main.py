@@ -128,7 +128,7 @@ templates = Jinja2Templates(directory=Path(__file__).parent / "templates")
 async def http_exception_handler(
     request: Request, exc: StarletteHTTPException
 ) -> Response:
-    """Show a styled page for 404s; keep the default JSON for anything else.
+    """Show a styled page for 404 errors; keep the default JSON for anything else.
 
     Args:
         request (Request): The incoming request (needed by Jinja2Templates).
