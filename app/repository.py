@@ -204,8 +204,13 @@ def resolve_target_date(
                 target_date = latest_date
     else:
         # No search: Task #1 default behavior (today, with fallback if
-        # "today" doesn't have published data yet).
+        # "today" doesn't have published data yet). If today is already
+        # beyond the latest published date, skip straight to it instead
+        # of running a query we already know will come back empty.
         target_date = datetime.date.today()
+        if latest_date is not None and target_date > latest_date:
+            fallback = True
+            target_date = latest_date
 
     results = (
         get_regional_totals(session, target_date, sort_order) if target_date else []
