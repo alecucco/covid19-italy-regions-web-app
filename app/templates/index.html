@@ -28,6 +28,8 @@
     <p style="color:#888; font-size:0.85rem; margin-top:-0.5rem;">No more recent data available from the source</p>
     {% endif %}
 
+    <p style="color:#555; font-size:0.85rem;">Select a date and/or sort order, then click <strong>Search</strong> — the export always downloads what's currently displayed below.</p>
+
     <form method="get" action="/">
         <div>
             <!-- min/max/value are a convenience for the browser's date
@@ -50,6 +52,15 @@
              matches what's shown on the page, not a fixed default. -->
         <a href="/export?date={{ shown_date_iso }}&sort={{ sort_order }}"><button type="button">Export .xls</button></a>
     </form>
+
+    <p style="color:#555; font-size:0.85rem;">
+        Showing: <strong>{{ shown_date }}</strong>, sorted by
+        {% if sort_order == "cases_desc" %}total cases (descending)
+        {%- elif sort_order == "cases_asc" %}total cases (ascending)
+        {%- elif sort_order == "name_asc" %}region name (A-Z)
+        {%- elif sort_order == "name_desc" %}region name (Z-A)
+        {%- endif %}
+    </p>
 
     <table>
         <thead>
