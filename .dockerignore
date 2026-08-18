@@ -12,6 +12,9 @@
 __pycache__/
 *.pyc
 
+# pytest cache
+.pytest_cache/
+
 # Personal working notes, not part of the application
 documents/
 
