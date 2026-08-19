@@ -8,14 +8,19 @@ A web application that reads COVID-19 case data published by the Italian Civil P
 
 Before writing any code, the source dataset was analysed directly. Several of its characteristics turned out to have a direct impact on the schema design — two of them would have caused silent, hard-to-spot bugs if discovered later.
 
-The source is `dpc-covid19-ita-province.json`: the full historical series at province level, published by the Italian Civil Protection Department.
+The application uses two official files published by the Italian Civil Protection Department:
+
+- [`dpc-covid19-ita-province.json`](https://github.com/pcm-dpc/COVID-19/blob/master/dati-json/dpc-covid19-ita-province.json): the complete historical province-level dataset, used for the initial load and for full updates.
+- [`dpc-covid19-ita-province-latest.json`](https://github.com/pcm-dpc/COVID-19/blob/master/dati-json/dpc-covid19-ita-province-latest.json): the much smaller file containing only the most recent published day, used at startup to check whether the local database is already up to date before deciding whether the full dataset needs to be downloaded again.
+
+The analysis below refers to the full historical dataset.
 
 | Property | Value |
 |---|---|
 | Total records | 262,807 |
 | Distinct dates | 1,781 (24/02/2020 – 08/01/2025, no gaps) |
 | Distinct regions | 21 |
-| Distinct provinces | 149 |
+| Distinct province codes | 149 |
 
 **The 149 "provinces" are not 149 provinces.** Italy has 107 provinces, but the dataset contains 149 distinct province codes. The extra 42 are placeholder entries the source publishes for each region, documented in the official data notes:
 
@@ -29,9 +34,11 @@ These placeholders carry real case counts (cases not yet attributed to a specifi
 
 **The number of provinces per day is not constant.** The "out of region" placeholders only appear from 25/06/2020 onward. Before that date, each day has 128 rows (107 + 21); after it, 149. Any validation assuming a fixed row count would fail across the first four months of the pandemic.
 
-**Timestamps are not consistent.** The `data` field is a full timestamp, but the time component varies: `17:00:00` on 261,527 rows and `18:00:00` on 1,280 (an early daylight-saving artifact). Searching for an exact timestamp match would silently return nothing for those dates. Ingestion truncates to date only.
+**Timestamps are not consistent.** The `data` field is a full timestamp, but the time component varies: `17:00:00` on 261,527 rows and `18:00:00` on 1,280. The application works at day granularity, so treating the full timestamp as the date key would be both unnecessary and error-prone. Ingestion therefore truncates it to date only.
 
-**Cross-validation against an independent source.** As a final check, the aggregation produced by this application (summing province-level values) was compared against the pre-aggregated regional file published by the same source. All 21 regions matched exactly — confirming both the aggregation logic and, separately, the region code normalization described below.
+**`totale_casi` is cumulative, not daily.** Each value represents the total number of cases recorded for that province up to that date, not the number of new cases reported on that day. Regional totals must therefore be calculated by summing provinces within a single date; summing values across dates would count the same cases repeatedly.
+
+**Cross-validation against a separate official dataset.** As a final check, the aggregation produced by this application (summing province-level values) was compared against the pre-aggregated regional file published by the same source. All 21 regions matched exactly — confirming both the aggregation logic and, separately, the region code normalization described below.
 
 ---
 
@@ -39,23 +46,29 @@ These placeholders carry real case counts (cases not yet attributed to a specifi
 
 ### 2.1 Why relational
 
-The core operation is `GROUP BY region, SUM(cases), ORDER BY` — relational algebra in its purest form. The data is perfectly rectangular with a fixed schema, writes are essentially a one-time bulk load, and there's no write concurrency to manage. A document store would add operational complexity without addressing any actual constraint of this workload.
+The core operation is `GROUP BY region, SUM(cases), ORDER BY` — a natural fit for a relational database. The source data has a fixed, well-defined schema and clear relationships between regions, provinces, and daily case records. The write workload is batch-oriented — an initial bulk load followed only by occasional updates — while the application is primarily read-oriented. A document store would add complexity without addressing any requirement that the relational model does not already handle directly.
 
 ### 2.2 Why separate tables
 
-Three designs were built and measured against the real dataset:
+The database is split into three tables because the source contains three different kinds of information with different lifecycles: regions, provinces, and case values that change every day. Keeping all of them in a single flat table would repeat the same geographic metadata for every daily record.
 
-| Design | Aggregate query | Database size |
-|---|---|---|
-| Three normalized tables | 0.088 ms | **13.0 MB** |
-| Two tables (region denormalized onto facts) | 0.090 ms | 13.6 MB |
-| Single flat table, no joins | 0.082 ms | 24.2 MB |
+With the normalized design:
 
-The flat table is faster by 6 microseconds — statistical noise — while using 86% more space. Joins cost almost nothing here: the dimension tables are tiny (21 and 149 rows, effectively cached after first access), the join is on an integer primary key, and the date filter reduces the fact rows to ~150 before any join happens.
+- `regions` stores each region once, together with attributes that belong to the region itself, such as its name and NUTS codes.
+- `provinces` stores each province — including the placeholder province entries published by the source — once, and links it to its region through `region_code`.
+- `province_cases` stores only the values that actually vary over time: the date, province, cumulative case count, and optional notes.
 
-**The stronger argument is correctness, not performance.** In the flat design, the region name is stored 262,807 times. A single row with a slightly different spelling would silently produce a phantom 22nd region in the `GROUP BY`, with no error raised. In the normalized design the name exists once, and a foreign key rejects any reference to a region that doesn't exist.
+This mirrors the real relationships in the data: **one region has many provinces, and one province has many daily case records**. The foreign keys make those relationships explicit and prevent a case row from referring to a province that does not exist, or a province from referring to an unknown region.
+
+The main advantage over a single table is therefore **data integrity and reduced duplication**. In a flat design, values such as the region name, province name, abbreviation, coordinates, and NUTS codes would be repeated across thousands of daily rows even though they describe the same geographic entity. Besides wasting space, this creates update and consistency problems: if the same region or province were stored with two different names or attributes, both versions could coexist silently and affect grouping or later queries. In the normalized schema there is one authoritative row for each region and province, so their descriptive data is stored in one place.
+
+The separation also matches how ingestion works. Records are first normalized into unique regions and provinces, then daily case rows are loaded afterwards. The database is populated in the same dependency order enforced by the foreign keys: `regions` → `provinces` → `province_cases`. Re-running ingestion is safe because the natural primary keys identify the same entities and daily records consistently.
+
+This design does require joins when calculating regional totals, but those joins are simple and follow primary/foreign-key relationships. For this application that trade-off is preferable to duplicating geographic information throughout the fact data: the schema remains compact, consistent, and closely aligned with the structure of the source.
 
 ### 2.3 Database schema
+
+The ORM models correspond to the following simplified SQL schema:
 
 ```sql
 CREATE TABLE regions (
@@ -84,13 +97,15 @@ CREATE TABLE province_cases (
 );
 ```
 
-**Natural keys, not surrogate ids.** Both `region_code` (after normalization, see 2.4) and `province_code` were verified stable and unique across all 262,807 rows — same name, abbreviation, coordinates and parent region throughout. There's no reason to invent a key when the source provides a reliable one.
+<p align="center">
+  <img src="images/database-schema.png" alt="Database schema diagram showing regions, provinces, and province_cases relationships" width="90%">
+  <br>
+  <em>Database schema and relationships</em>
+</p>
 
-**Composite primary key on the fact table.** `(date, province_code)` is the real natural key — verified: zero duplicates across the entire series. This makes ingestion idempotent (re-running it can't duplicate rows, via `ON CONFLICT DO NOTHING`), and the implicit index has `date` as its leading column, which covers the main query without a separate index: measured, the aggregate query goes from 13.36 ms without it to 0.06 ms with it.
+**Natural keys, not surrogate ids.** Both `region_code` (after normalization, see §2.4) and `province_code` were verified to be stable and unique across the full dataset. Since the source already provides reliable identifiers for both entities, introducing additional surrogate IDs would add no practical benefit.
 
-**NUTS codes** (`nuts_1`/`nuts_2` on regions, `nuts_3` on provinces) are placed as stable attributes of the geographic entity: verified constant per entity across the whole series, not daily-varying facts.
-
-**Deliberately omitted:** the `stato` field (always `"ITA"`), and a column classifying the placeholder provinces — the source's own published summaries list them as ordinary rows, so distinguishing them adds complexity the application never needs.
+**Composite primary key on the fact table.** `(date, province_code)` is the natural key of `province_cases`: for a given day, each province has at most one case record. The combination was verified to contain no duplicates across the dataset. It also prevents duplicate inserts at database level and supports idempotent ingestion through `ON CONFLICT DO NOTHING`.
 
 ### 2.4 The region code problem, and how ingestion resolves it
 
@@ -121,83 +136,92 @@ Every other region's code passes through unchanged. This runs once, in one place
 
 ### 3.1 Packages and languages used
 
-Python, with:
-
-- **FastAPI** + **Uvicorn** — web framework and ASGI server. Native type hints, automatic request validation, and free OpenAPI documentation at `/docs` as a side effect of documenting the route functions.
-- **SQLAlchemy** — ORM. Parameterizes every value automatically, which is what makes SQL injection on the date parameter structurally impossible rather than a matter of discipline.
-- **PostgreSQL**, containerized — chosen as the more production-representative option over SQLite (which would have been technically sufficient for this workload), with Docker removing the setup burden that would normally be its drawback.
-- **Jinja2** — server-side HTML templates. No frontend framework: the app is a single page with a form and a table, and state lives in the URL, which doesn't warrant one.
-- **xlwt** — generates real legacy `.xls` files, as required — not `.xlsx`, which is what most modern libraries (e.g. `openpyxl`) write instead.
-- **httpx** — downloads the dataset from GitHub.
-- **rich** — readable, colour-coded console output during startup and ingestion.
+- **Python 3.12** — application language and runtime.
+- **FastAPI** + **Uvicorn** — web framework and ASGI server. FastAPI provides typed route definitions, request handling, and automatically generated OpenAPI documentation at `/docs`; Uvicorn runs the ASGI application.
+- **PostgreSQL 16** + **SQLAlchemy** + **psycopg** — database, ORM/query layer, and PostgreSQL driver. PostgreSQL was chosen as a production-representative relational database; SQLAlchemy keeps database access expressed through Python objects and bound values rather than hand-built SQL strings.
+- **Pydantic Settings** — typed, environment-based application configuration. Database settings are read from environment variables (and `.env` for local use), while Docker Compose overrides the host so the application can reach the `db` service by name.
+- **Jinja2** — server-side HTML templates. No frontend framework is used: the application is a single page with a form and a table, and its state is represented by URL query parameters, so a client-side framework would add complexity without solving a real requirement.
+- **xlwt** — generates genuine legacy `.xls` files, as required, rather than `.xlsx`.
+- **httpx** — downloads both the full historical dataset and the small `latest` file used for update checks.
+- **rich** — readable, colour-coded console output during startup and data ingestion.
 - **pytest** — automated test suite.
-- **Docker** / **Docker Compose** — containerized database and application.
+- **Docker** / **Docker Compose** — containerized application and PostgreSQL database, including service networking, persistent database storage, health checks, and startup dependency management.
 
 ### 3.2 Web application structure
 
-Two routes, both `GET`, both accepting the same two optional query parameters:
+The application exposes two `GET` routes, both accepting the same optional `date` and `sort` query parameters:
 
 | Route | Returns |
 |---|---|
 | `/?date=…&sort=…` | The HTML page |
 | `/export?date=…&sort=…` | The `.xls` file |
 
-Both delegate to a single shared function, `resolve_target_date()`, which validates the parameters, applies fallbacks, and runs the query. This guarantees the export can never disagree with the page for the same inputs, without keeping two code paths in sync.
+Both routes delegate date resolution, validation, fallback behaviour, sorting, and the regional aggregation query to the shared `resolve_target_date()` function. Keeping that logic in one place helps keep the page and the export consistent for the same resolved parameters, rather than maintaining two separate implementations.
 
-The application is stateless: no session, no server-side memory of previous requests. Every request re-runs the query from scratch — cheap, thanks to the primary key index — which means a URL can be shared or bookmarked and will always render the same view.
+The application is stateless: there is no session or server-side memory of the user's current selection. The selected date and sort order live in the URL. After the page has been rendered, the export link is built with the resolved `shown_date_iso` and `sort_order`, so `/export` receives the same resolved parameters as the currently displayed page.
+
+Each request opens a short-lived SQLAlchemy session, executes the required queries, and closes the session afterwards. No query result is kept in application memory between requests.
 
 ### 3.3 File overview
 
 ```
 app/
-├── main.py              # App setup, startup lifecycle, routes, error handlers
-├── config.py             # Environment-based configuration (.env)
-├── database.py             # SQLAlchemy engine/session setup
-├── models.py                # ORM models: Region, Province, ProvinceCase
-├── repository.py              # Aggregation queries, sorting, date resolution
+├── main.py                   # FastAPI app, startup lifecycle, routes, error handlers
+├── config.py                 # Environment-based configuration
+├── database.py               # SQLAlchemy engine/session setup
+├── models.py                 # ORM models: Region, Province, ProvinceCase
+├── repository.py             # Aggregation queries, sorting, date resolution
 ├── services/
-│   ├── ingestion.py              # Download, validate, and load data from GitHub
-│   └── export.py                   # .xls file generation
+│   ├── ingestion.py          # Download, validate, and load data from GitHub
+│   └── export.py             # .xls file generation
 └── templates/
-    ├── index.html                    # Main page
-    ├── error_404.html                  # Not found
-    ├── error_500.html                    # Unexpected error
-    └── error_503.html                      # Database unreachable
+    ├── index.html             # Main page
+    ├── error_404.html         # Custom 404 page
+    ├── error_500.html         # Custom 500 page
+    └── error_503.html         # Custom 503 page (database unreachable)
+
+tests/
+├── conftest.py               # Shared fixtures and temporary SQLite test database
+├── test_repository.py        # Aggregation, sorting, and date resolution tests
+├── test_routes.py            # HTTP route and security tests
+└── test_export.py            # .xls generation tests
+
+docker-compose.yml             # PostgreSQL + application services
+Dockerfile                     # Application image
+requirements.txt               # Runtime dependencies
+requirements-dev.txt           # Development/test dependencies
+.env.example                   # Example environment configuration
+technical-notes.md             # Detailed technical decisions and implementation notes
+README.md                      # Project documentation
 ```
 
-| File | Responsibility |
-|---|---|
-| `config.py` | Reads `.env` into a typed `Settings` object; builds the database connection string |
-| `database.py` | Creates the SQLAlchemy engine (with a bounded connection timeout) and session factory |
-| `models.py` | The three ORM classes mapping directly to the schema in §2.3 |
-| `repository.py` | All read queries: aggregation, sorting whitelist, date validation and fallback logic |
-| `main.py` | Wires everything together: startup sequence, the two routes, the three error handlers |
-| `services/ingestion.py` | Everything related to getting data from GitHub into the database |
-| `services/export.py` | Turns a list of `(region, cases)` pairs into an `.xls` file |
+The application code is deliberately split by responsibility: `main.py` wires together the web layer and lifecycle, `repository.py` contains the read/query logic, and the `services` package contains ingestion and export operations. Configuration, database setup, ORM models, templates, tests, and deployment files remain separate from those concerns.
 
-### 3.4 Table creation and population logic
+### 3.4 Startup and data population logic
 
-Everything below runs once, at server startup, inside FastAPI's lifespan handler — never per request:
+The following sequence runs once per application startup inside FastAPI's lifespan handler, never on individual requests:
 
 ```
 1. Wait for the database (retries with a bounded timeout)
    ↓
-2. Create tables if missing (idempotent, safe to call every time)
+2. Create any missing tables
    ↓
-3. Database empty?
-   ├── YES → download full dataset, validate, load
+3. Is province_cases empty?
+   ├── YES → download the full dataset, validate/normalize it, and load it
    └── NO  → download only the small "latest" file and compare dates
-             ├── new data available → download full dataset and update
-             └── already current, or check failed → skip
+             ├── newer data available → download the full dataset and ingest it
+             └── already current, or update check failed → keep existing data
    ↓
 4. Server starts accepting requests
 ```
 
-Re-downloading 109 MB on every startup just to check whether anything changed would be wasteful. The source also publishes a small file containing only the most recent day; comparing its date against `MAX(date)` in the database answers the question for roughly 0.05% of the bandwidth.
+Re-downloading roughly 109 MB on every startup just to discover whether anything changed would be wasteful. The source also publishes a much smaller file containing only the latest day, so `check_for_updates()` compares that date with `MAX(province_cases.date)` before deciding whether a full download is necessary.
+
+When a full ingestion is required, `run_ingestion()` follows one pipeline: download → validation and normalization → database load. Regions are written before provinces, and provinces before case records, so foreign-key dependencies are satisfied. Case records are inserted in batches of 5,000, while conflict-safe inserts make the operation idempotent when data already present in the database is encountered.
 
 ### 3.5 How each feature works
 
-**Regional overview and sorting.** The main query:
+**Regional overview and sorting.** The main query performs the aggregation in PostgreSQL rather than loading all province rows into Python:
 
 ```python
 select(Region.region_name, func.sum(ProvinceCase.total_cases).label("total"))
@@ -208,15 +232,15 @@ select(Region.region_name, func.sum(ProvinceCase.total_cases).label("total"))
     .order_by(*order_by)
 ```
 
-`total_cases` in the source is **cumulative** — the running total for that province since the start of the pandemic, not new cases that day. The query sums across provinces *within a single date*, never across dates: summing the same province over multiple days would count the same cases repeatedly.
+As established in §1, `total_cases` is cumulative. The query therefore filters to one date first and sums the province values within each region; it never sums the same province across multiple dates. The default order is total cases descending, with region name ascending as the alphabetical tiebreaker required by the task.
 
-The sort order (`order_by`) is chosen from four fixed options via a Python `Enum`, never built from a raw string — see §4.2.
+The requested sort order is represented by a closed `SortOrder` enum with four allowed values (`cases_desc`, `cases_asc`, `name_asc`, `name_desc`). The repository maps those values to predefined SQLAlchemy `ORDER BY` expressions rather than constructing SQL from the raw query parameter.
 
-**Date search.** `date` is parsed with `datetime.date.fromisoformat()`. Anything that isn't a valid ISO date is rejected with a clear message; a date outside the available range produces a specific message stating the actual boundary. In every failure case, the page still falls back to showing the most recent available date rather than an empty table.
+**Date search.** `resolve_target_date()` reads the earliest and latest dates stored in the database and parses an explicitly requested date with `datetime.date.fromisoformat()`. Malformed dates and dates outside the available range produce a clear message and fall back to the most recent available date instead of leaving the page empty. The browser's date-picker limits are only a convenience; the server performs the actual validation.
 
-The source stopped publishing on 08/01/2025, so "today" — accessed with no search — has no data. Rather than an empty page, the application falls back to the most recent available date and states this explicitly. That notice appears only when no date was explicitly requested; searching a specific past date returns exactly what was asked for, with no notice.
+With no explicit date, the application starts from today's date. Because the source stopped publishing on 08/01/2025, the application falls back to the most recent available date when no data exists for today and displays that fact explicitly. A valid historical date requested by the user is shown directly without that fallback notice.
 
-**Export.** Calls the same `resolve_target_date()` as the page, then hands the resulting rows to `generate_xls()`, which writes two columns (region, total cases) into a single sheet using `xlwt`, and returns the raw file bytes as a downloadable attachment. Because it shares the resolution logic with the page, the exported file is always consistent with whatever is currently shown — including the same fallback and validation behaviour.
+**Export.** The page builds the export link with its currently resolved date and sort order. `/export` then calls the same `resolve_target_date()` used by the HTML route and passes the resulting rows to `generate_xls()`. The exporter writes two columns (`Region`, `Total cases`) to a single worksheet with `xlwt` and returns the workbook bytes as an `application/vnd.ms-excel` attachment whose filename includes the resolved date.
 
 ---
 
@@ -234,11 +258,11 @@ Three distinct failure scenarios are handled, each verified by actually triggeri
 
 ### 4.2 Security checks and their responses
 
-Every check below was verified with an actual malicious payload, not assumed from the design.
+The protections below were verified either through automated malicious-input tests or through direct configuration/runtime checks.
 
 | Check | How it's enforced | Verified response |
 |---|---|---|
-| SQL injection via `date` | `datetime.date.fromisoformat()` — anything invalid raises before touching SQL; the parsed value is then a bound parameter, never interpolated | Malformed input → clear error message, page still renders |
+| SQL injection via `date` | The input is first parsed with `datetime.date.fromisoformat()`, rejecting malformed values; the resulting date is then passed to SQLAlchemy as a bound parameter, never concatenated into SQL | Malformed input → clear error message, page still renders |
 | SQL injection via `sort` | Mapped through a closed `Enum` (`cases_desc`, `cases_asc`, `name_asc`, `name_desc`); `ORDER BY` cannot be parameterized like a value, so this is the actual defense | Payload `x; DROP TABLE regions;--` → falls back to default sort, tables intact afterwards |
 | Cross-site scripting | Invalid parameter values are echoed in error messages; Jinja2 autoescaping is on by default for `.html` templates | Payload `<script>alert(1)</script>` → appears only as escaped text (`&lt;script&gt;`), never executable |
 | Information disclosure on unexpected errors | A catch-all exception handler logs the full traceback server-side, returns only a generic page to the client | Forced an error whose message contained a database password → password never appeared in the client response |
@@ -250,38 +274,38 @@ Every check below was verified with an actual malicious payload, not assumed fro
 
 ## 5. Testing
 
-### 5.1 File structure
+The automated suite contains **25 tests in total**, split into three areas: **12 repository tests**, **10 HTTP route tests**, and **3 export tests**.
+
+### 5.1 Test environment
 
 ```
 tests/
-├── conftest.py           # Shared fixtures: temporary SQLite database, fake seed data
-├── test_repository.py     # Aggregation, sorting, date/sort validation
-├── test_export.py           # .xls file generation
-└── test_routes.py             # Full HTTP requests through the two routes
+├── conftest.py               # Shared fixtures and temporary SQLite test database
+├── test_repository.py        # 12 aggregation, sorting, and date-resolution tests
+├── test_routes.py            # 10 HTTP route, validation, security, and consistency tests
+└── test_export.py            # 3 .xls generation tests
 ```
 
-`conftest.py` is the foundation: before the application is even imported, it swaps the database engine for a temporary SQLite file, creates the schema, and seeds it with three fake regions, three provinces, and two dates — with case counts chosen so that sorting by cases and sorting by name always produce *different* orderings, making sort assertions unambiguous. Region names (`TestRegionA`, `TestRegionB`, `TestRegionZ`) are deliberately unlike any real region, so a bug that accidentally reached real data would be obvious. Network calls (`needs_ingestion`, `check_for_updates`) are patched out, so the suite never contacts GitHub.
+`conftest.py` replaces the production database engine with a **temporary file-backed SQLite database** before the application is imported. It creates the same SQLAlchemy schema used by the application and seeds it with a small, controlled dataset: three fake regions, three provinces, and two dates. The case values are deliberately chosen so that sorting by cases and sorting by name produce different orderings, making the assertions unambiguous. Region names (`TestRegionA`, `TestRegionB`, `TestRegionZ`) are intentionally unlike real data, so accidental use of the production dataset would also be immediately visible.
 
-This is a deliberate trade-off over testing against the real 262,807 records: slower, dependent on an internet connection, and liable to break whenever the upstream data changes. The fixed dataset makes every assertion exact and every run identical — the full suite runs in well under a second.
+SQLite is used deliberately for the automated suite because it is self-contained and requires no running database server or Docker container. This keeps the tests fast, portable, and deterministic while still exercising the SQLAlchemy models, repository queries, FastAPI routes, and application logic against a real relational database. The database file is created in the operating system's temporary directory with a unique name and removed at the end of the pytest session.
 
-The dialect-aware upsert helper in `ingestion.py` is what makes this possible for the ingestion path specifically: it selects PostgreSQL or SQLite syntax based on the connected database, so the same production code runs unmodified against the test database.
+The suite also uses fixed sample data instead of the real 262,807-record dataset. Depending on the complete upstream dataset would make tests slower, require network access, and allow upstream changes to alter expected results. With controlled fixtures, every assertion is exact and repeatable. Network-dependent startup checks (`needs_ingestion` and `check_for_updates`) are patched out for the HTTP tests, so the suite never contacts GitHub.
+
+This setup is intentionally not a replacement for PostgreSQL integration testing: SQLite is used to verify the application's database-independent behaviour quickly and locally, while PostgreSQL remains the production database.
 
 ### 5.2 What the tests do
 
-| File | Coverage |
-|---|---|
-| `test_repository.py` | Aggregation correctness; all four sort orders; date validation across every edge case (valid, out of range, malformed); an injection attempt on the sort parameter |
-| `test_export.py` | The generated file is genuine OLE2; headers and data land in the right columns; empty input still produces a valid file |
-| `test_routes.py` | Full HTTP round-trips; fallback behaviour; error banners; XSS and injection payloads; consistency between the page and the export for identical parameters |
+| File | Tests | Coverage |
+|---|---:|---|
+| `test_repository.py` | **12** | Earliest/latest available date; regional aggregation; all four sort orders; valid, out-of-range and malformed dates; invalid sort fallback; SQL-injection attempt on the sort parameter |
+| `test_routes.py` | **10** | Full requests through FastAPI's `TestClient`; default/latest fallback; valid and invalid date handling; sorting; invalid sort handling; XSS and SQL-injection payloads; `.xls` route response; consistency between the page and export for identical parameters |
+| `test_export.py` | **3** | Genuine OLE2/BIFF `.xls` output; correct headers and row data; valid header-only workbook for empty input |
+| **Total** | **25** | Repository logic, HTTP behaviour, security checks, and export generation |
 
-That last check in `test_routes.py` is the automated version of a bug found manually during development, when the export link was static and silently ignored the current search — it fetches both the page and the export with the same parameters and asserts they contain exactly the same data.
+The route tests exercise the application through FastAPI's `TestClient`, so they verify the route, template, repository, and database layers together without requiring a real Uvicorn server or browser.
 
-Running them:
-
-```bash
-pip install -r requirements-dev.txt
-pytest tests/ -v
-```
+One particularly useful regression test compares the HTML page and the `.xls` export using the same date and sort parameters and asserts that they contain exactly the same data. It captures a bug found manually during development, when the export link was static and could silently ignore the current search.
 
 ---
 
@@ -289,7 +313,8 @@ pytest tests/ -v
 
 This project was developed with the assistance of Claude (Anthropic) — specifically Claude Sonnet 5, with high/extended reasoning enabled. It was used for:
 
-- Research and documentation lookup on which packages and libraries to use for a given problem, and how to use them idiomatically
-- Support in managing security aspects
-- Writing and translating the documentation embedded in the code (docstrings, comments), README file and this document
-- Building the automated test suite
+- Research and documentation lookup on libraries, APIs, and implementation approaches
+- Support in reviewing security aspects and edge cases
+- Reviewing the code to identify potential bugs, inconsistencies, and missing validations
+- Writing and refining code comments, docstrings, the README, and these technical notes
+- Support in designing and expanding the automated test suite
