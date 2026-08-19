@@ -217,8 +217,9 @@ def resolve_target_date(
     )
 
     if not results and not error:
-        # "Today" (or the fallback date) has no data -- show the most
-        # recent available day instead, and say so explicitly.
+        # If the resolved date falls within the available range (earliest_date
+        # to latest_date) but has no data of its own -- a gap in the series --
+        # show the most recent available day instead, and state this explicitly.
         fallback = True
         if latest_date is not None:
             target_date = latest_date
