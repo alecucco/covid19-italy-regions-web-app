@@ -112,7 +112,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         else:
             console.print("[bold green]✓[/bold green] Data already up to date, no download needed")
 
-    console.print("[bold green]✓[/bold green] Application ready\n")
+    console.print("[bold green]✓[/bold green] Application ready")
+    console.print("[bold cyan]→ Open http://localhost:8000 in your browser[/bold cyan]\n")
 
     yield
 
