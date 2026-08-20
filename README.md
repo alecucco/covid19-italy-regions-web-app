@@ -39,7 +39,7 @@ The export always reflects the currently displayed results. If you change the da
 
 ## Getting started
 
-Requires [Docker](https://www.docker.com/) with Docker Compose; no local Python installation is needed.
+Requires [Docker](https://www.docker.com/) with Docker Compose, and Docker must be running before starting the application. No local Python installation is needed.
 
 ```bash
 git clone <this-repository-url>
@@ -57,7 +57,7 @@ Open [http://localhost:8000](http://localhost:8000). On first run, the applicati
 </p>
 
 ## Running the tests
-Tests run against a temporary SQLite database with fixed sample data, no network access or running Postgres instance required.
+Requires Python installed locally. Tests run against a temporary SQLite database with fixed sample data, so no network access, Docker, or running PostgreSQL instance is required.
 
 ```bash
 python -m venv .venv
