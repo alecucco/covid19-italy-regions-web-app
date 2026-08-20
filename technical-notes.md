@@ -1,4 +1,4 @@
-# Technical Decisions
+# Technical Notes
 
 A web application that reads COVID-19 case data published by the Italian Civil Protection Department, stores it in PostgreSQL, and shows total cases by region — searchable, sortable, and exportable to `.xls`.
 
