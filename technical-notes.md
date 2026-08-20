@@ -2,6 +2,15 @@
 
 A web application that reads COVID-19 case data published by the Italian Civil Protection Department, stores it in PostgreSQL, and shows total cases by region — searchable, sortable, and exportable to `.xls`.
 
+## Contents
+
+1. [Understanding the data](#1-understanding-the-data)
+2. [Database](#2-database)
+3. [Application](#3-application)
+4. [Security](#4-security)
+5. [Testing](#5-testing)
+6. [AI assistance](#6-ai-assistance)
+
 ---
 
 ## 1. Understanding the data
@@ -14,6 +23,26 @@ The application uses two official files published by the Italian Civil Protectio
 - [`dpc-covid19-ita-province-latest.json`](https://github.com/pcm-dpc/COVID-19/blob/master/dati-json/dpc-covid19-ita-province-latest.json): the much smaller file containing only the most recent published day, used at startup to check whether the local database is already up to date before deciding whether the full dataset needs to be downloaded again.
 
 The analysis below refers to the full historical dataset.
+
+### 1.1 Province-level fields
+
+The official Civil Protection [dataset documentation](https://github.com/pcm-dpc/COVID-19/blob/master/dati-andamento-covid19-italia.md#dati-per-provincia) describes the province-level records with the following fields:
+
+| Field | Meaning |
+|---|---|
+| `data` | Date and time of the notification, expressed in Italian local time using ISO 8601 format. |
+| `stato` | Country of reference, represented by its ISO 3166-1 alpha-3 code (`ITA`). |
+| `codice_regione` | ISTAT code of the region. |
+| `denominazione_regione` | Name of the region. |
+| `codice_provincia` | ISTAT code of the province. |
+| `denominazione_provincia` | Name of the province. |
+| `sigla_provincia` | Province abbreviation. |
+| `lat` | Province latitude in WGS84 coordinates. |
+| `long` | Province longitude in WGS84 coordinates. |
+| `totale_casi` | Total number of positive cases recorded for the province. |
+| `note` | Optional notes in Italian. |
+
+The same official documentation also explains the two special province entries published for each region: **“Fuori Regione / Provincia Autonoma”** (`879–899`) for cases associated with people outside the region or autonomous province, and **“In fase di definizione/aggiornamento”** (`979–999`) for cases not yet assigned to a province. These entries are discussed in more detail below because they directly affect validation and regional aggregation.
 
 | Property | Value |
 |---|---|
@@ -46,7 +75,7 @@ These placeholders carry real case counts (cases not yet attributed to a specifi
 
 ### 2.1 Why relational
 
-The core operation is `GROUP BY region, SUM(cases), ORDER BY` — a natural fit for a relational database. The source data has a fixed, well-defined schema and clear relationships between regions, provinces, and daily case records. The write workload is batch-oriented — an initial bulk load followed only by occasional updates — while the application is primarily read-oriented. A document store would add complexity without addressing any requirement that the relational model does not already handle directly.
+The core operation is `SUM(cases), GROUP BY region, ORDER BY` — a natural fit for a relational database. The source data has a fixed, well-defined schema and clear relationships between regions, provinces, and daily case records. The write workload is batch-oriented — an initial bulk load followed only by occasional updates — while the application is primarily read-oriented. A document store would add complexity without addressing any requirement that the relational model does not already handle directly.
 
 ### 2.2 Why separate tables
 
@@ -62,7 +91,7 @@ This mirrors the real relationships in the data: **one region has many provinces
 
 The main advantage over a single table is therefore **data integrity and reduced duplication**. In a flat design, values such as the region name, province name, abbreviation, coordinates, and NUTS codes would be repeated across thousands of daily rows even though they describe the same geographic entity. Besides wasting space, this creates update and consistency problems: if the same region or province were stored with two different names or attributes, both versions could coexist silently and affect grouping or later queries. In the normalized schema there is one authoritative row for each region and province, so their descriptive data is stored in one place.
 
-The separation also matches how ingestion works. Records are first normalized into unique regions and provinces, then daily case rows are loaded afterwards. The database is populated in the same dependency order enforced by the foreign keys: `regions` → `provinces` → `province_cases`. Re-running ingestion is safe because the natural primary keys identify the same entities and daily records consistently.
+The separation also matches how ingestion works. Records are first normalized into unique regions and provinces, then daily case rows are loaded afterwards. The database is populated in the same dependency order enforced by the foreign keys: `regions` → `provinces` → `province_cases`. Re-running ingestion does not create duplicate rows because the natural primary keys identify the same entities and daily records consistently.
 
 This design does require joins when calculating regional totals, but those joins are simple and follow primary/foreign-key relationships. For this application that trade-off is preferable to duplicating geographic information throughout the fact data: the schema remains compact, consistent, and closely aligned with the structure of the source.
 
@@ -103,9 +132,9 @@ CREATE TABLE province_cases (
   <em>Database schema and relationships</em>
 </p>
 
-**Natural keys, not surrogate ids.** Both `region_code` (after normalization, see §2.4) and `province_code` were verified to be stable and unique across the full dataset. Since the source already provides reliable identifiers for both entities, introducing additional surrogate IDs would add no practical benefit.
+**Natural keys, not surrogate ids.** Both `region_code` (after normalization, see [2.4](#24-the-region-code-problem-and-how-ingestion-resolves-it)) and `province_code` were verified to be stable and unique across the full dataset. Since the source already provides reliable identifiers for both entities, introducing additional surrogate IDs would add no practical benefit.
 
-**Composite primary key on the fact table.** `(date, province_code)` is the natural key of `province_cases`: for a given day, each province has at most one case record. The combination was verified to contain no duplicates across the dataset. It also prevents duplicate inserts at database level and supports idempotent ingestion through `ON CONFLICT DO NOTHING`.
+**Composite primary key on the fact table.** `(date, province_code)` is the natural key of `province_cases`: for a given day, each province has at most one case record. The combination was verified to contain no duplicates across the dataset. It also prevents duplicate inserts at database level and supports ingestion through `ON CONFLICT DO NOTHING`.
 
 ### 2.4 The region code problem, and how ingestion resolves it
 
@@ -136,12 +165,12 @@ Every other region's code passes through unchanged. This runs once, in one place
 
 ### 3.1 Packages and languages used
 
-- **Python 3.12** — application language and runtime.
+- **Python 3.12** — application language.
 - **FastAPI** + **Uvicorn** — web framework and ASGI server. FastAPI provides typed route definitions, request handling, and automatically generated OpenAPI documentation at `/docs`; Uvicorn runs the ASGI application.
 - **PostgreSQL 16** + **SQLAlchemy** + **psycopg** — database, ORM/query layer, and PostgreSQL driver. PostgreSQL was chosen as a production-representative relational database; SQLAlchemy keeps database access expressed through Python objects and bound values rather than hand-built SQL strings.
 - **Pydantic Settings** — typed, environment-based application configuration. Database settings are read from environment variables (and `.env` for local use), while Docker Compose overrides the host so the application can reach the `db` service by name.
 - **Jinja2** — server-side HTML templates. No frontend framework is used: the application is a single page with a form and a table, and its state is represented by URL query parameters, so a client-side framework would add complexity without solving a real requirement.
-- **xlwt** — generates genuine legacy `.xls` files, as required, rather than `.xlsx`.
+- **xlwt** — generates genuine legacy `.xls` files.
 - **httpx** — downloads both the full historical dataset and the small `latest` file used for update checks.
 - **rich** — readable, colour-coded console output during startup and data ingestion.
 - **pytest** — automated test suite.
@@ -207,8 +236,8 @@ The following sequence runs once per application startup inside FastAPI's lifesp
 2. Create any missing tables
    ↓
 3. Is province_cases empty?
-   ├── YES → download the full dataset, validate/normalize it, and load it
-   └── NO  → download only the small "latest" file and compare dates
+   ├── YES → download the full dataset from GitHub, validate/normalize it, and load it
+   └── NO  → download only the small "latest" file from GitHub and compare dates
              ├── newer data available → download the full dataset and ingest it
              └── already current, or update check failed → keep existing data
    ↓
@@ -217,7 +246,7 @@ The following sequence runs once per application startup inside FastAPI's lifesp
 
 Re-downloading roughly 109 MB on every startup just to discover whether anything changed would be wasteful. The source also publishes a much smaller file containing only the latest day, so `check_for_updates()` compares that date with `MAX(province_cases.date)` before deciding whether a full download is necessary.
 
-When a full ingestion is required, `run_ingestion()` follows one pipeline: download → validation and normalization → database load. Regions are written before provinces, and provinces before case records, so foreign-key dependencies are satisfied. Case records are inserted in batches of 5,000, while conflict-safe inserts make the operation idempotent when data already present in the database is encountered.
+When a full ingestion is required, `run_ingestion()` follows one pipeline: download → validation and normalization → database load. Regions are written before provinces, and provinces before case records, so foreign-key dependencies are satisfied. Case records are inserted in batches of 5,000, while conflict-safe inserts prevent duplicate rows when already-present data is encountered.
 
 ### 3.5 How each feature works
 
@@ -232,7 +261,7 @@ select(Region.region_name, func.sum(ProvinceCase.total_cases).label("total"))
     .order_by(*order_by)
 ```
 
-As established in §1, `total_cases` is cumulative. The query therefore filters to one date first and sums the province values within each region; it never sums the same province across multiple dates. The default order is total cases descending, with region name ascending as the alphabetical tiebreaker required by the task.
+As established in [1](#1-understanding-the-data), `total_cases` is cumulative. The query therefore filters to one date first and sums the province values within each region; it never sums the same province across multiple dates. The default order is total cases descending, with region name ascending as the alphabetical tiebreaker required by the task.
 
 The requested sort order is represented by a closed `SortOrder` enum with four allowed values (`cases_desc`, `cases_asc`, `name_asc`, `name_desc`). The repository maps those values to predefined SQLAlchemy `ORDER BY` expressions rather than constructing SQL from the raw query parameter.
 
@@ -268,8 +297,6 @@ The protections below were verified either through automated malicious-input tes
 | Information disclosure on unexpected errors | A catch-all exception handler logs the full traceback server-side, returns only a generic page to the client | Forced an error whose message contained a database password → password never appeared in the client response |
 | Secrets in source control / image | `.env` excluded from both Git (`.gitignore`) and the Docker build context (`.dockerignore`) — two separate mechanisms, both necessary | `.env` confirmed absent from `git status` before every commit, and from the built image |
 
-**Deliberately out of scope:** CSRF (both routes are `GET` and read-only, nothing for a third party to forge), rate limiting (an infrastructure-layer concern, not application code), HTTPS (a deployment concern, not the application itself).
-
 ---
 
 ## 5. Testing
@@ -292,7 +319,7 @@ SQLite is used deliberately for the automated suite because it is self-contained
 
 The suite also uses fixed sample data instead of the real 262,807-record dataset. Depending on the complete upstream dataset would make tests slower, require network access, and allow upstream changes to alter expected results. With controlled fixtures, every assertion is exact and repeatable. Network-dependent startup checks (`needs_ingestion` and `check_for_updates`) are patched out for the HTTP tests, so the suite never contacts GitHub.
 
-This setup is intentionally not a replacement for PostgreSQL integration testing: SQLite is used to verify the application's database-independent behaviour quickly and locally, while PostgreSQL remains the production database.
+SQLite is used to verify the application's database-independent behaviour quickly and locally, while PostgreSQL remains the production database.
 
 ### 5.2 What the tests do
 
@@ -305,15 +332,16 @@ This setup is intentionally not a replacement for PostgreSQL integration testing
 
 The route tests exercise the application through FastAPI's `TestClient`, so they verify the route, template, repository, and database layers together without requiring a real Uvicorn server or browser.
 
-One particularly useful regression test compares the HTML page and the `.xls` export using the same date and sort parameters and asserts that they contain exactly the same data. It captures a bug found manually during development, when the export link was static and could silently ignore the current search.
+One particularly useful test compares the HTML page and the `.xls` export using the same date and sort parameters and asserts that they contain exactly the same data. It captures a bug found manually during development, when the export link was static and could silently ignore the current search.
 
 ---
 
 ## 6. AI assistance
 
-This project was developed with the assistance of Claude (Anthropic) — specifically Claude Sonnet 5, with high/extended reasoning enabled. It was used for:
+This project was developed with the assistance of Claude (Anthropic) — specifically Claude Sonnet 5, with high reasoning enabled. It was used for:
 
-- Research and documentation lookup on libraries, APIs, and implementation approaches
+- Research and documentation lookup on libraries and APIs
+- Support in checking the correctness and internal consistency of the data downloaded from the Civil Protection repository, including the validation and cross-checks described in [1](#1-understanding-the-data)
 - Support in reviewing security aspects and edge cases
 - Reviewing the code to identify potential bugs, inconsistencies, and missing validations
 - Writing and refining code comments, docstrings, the README, and these technical notes
